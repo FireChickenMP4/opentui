@@ -630,6 +630,8 @@ pub const Context = struct {
             .yoga_config = undefined,
         };
         try self.yoga_config.init(allocator, options.yoga_callbacks);
+        // Scene children must round inside their parents; public configs keep upstream rounding.
+        yoga.configSetRoundsPositionsFromAbsoluteEdges(self.yoga_config.ref, 1);
         self.yoga_config.setLogger(&self.logger);
         return self;
     }

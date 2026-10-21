@@ -1089,6 +1089,7 @@ pub fn yogaNodeHasContext(node: YGNodeConstRef) bool {
     return getContext(node) != null;
 }
 
+pub const configSetRoundsPositionsFromAbsoluteEdges = c.otYogaConfigSetRoundsPositionsFromAbsoluteEdges;
 pub const testFailAfter = c.otYogaTestFailAfter;
 pub const testAllocationCount = c.otYogaTestAllocationCount;
 pub const testContentsChildCount = c.otYogaTestContentsChildCount;
