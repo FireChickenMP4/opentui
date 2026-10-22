@@ -910,7 +910,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private readonly nativeDestroyWait?: ReturnType<typeof Promise.withResolvers<void>>
   private readonly nativeClosed: Promise<void>
   private nativeTerminalTransition: Promise<void> | null = null
-  private pendingNativeResize: { width: number; height: number } | null = null
+  private pendingNativeResize: { width: number; height: number; terminalDriven?: boolean } | null = null
   private pendingNativeMode: { screenMode: ScreenMode; footerHeight: number } | null = null
   private nativeSplitAcceptedCount = 0
   private nativeSplitFlush: Promise<void> | null = null
@@ -1016,8 +1016,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   private resizeTimeoutId: TimerHandle | null = null
   private pendingResizeSawDifferentSize = false
-  // Set by a terminal signal so the debounce can re-sample the real size before applying.
-  private pendingTerminalResize = false
   private capabilityTimeoutId: TimerHandle | null = null
   private terminalKeepAliveTimer: ReturnType<typeof setInterval> | null = null
   private xtVersionWaiters = new Set<() => void>()
@@ -1070,12 +1068,11 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     const width = this.stdout.columns
     const height = this.stdout.rows
     if (width > 0 && height > 0) {
-      this.pendingTerminalResize = true
       // A terminal can reflow or clear cells during a resize round-trip that ends at
       // the previous size, so a terminal signal is a reason to repaint even when the
       // sampled geometry did not change.
       this.pendingResizeSawDifferentSize = true
-      this.requestResize(width, height)
+      this.queueResize(width, height, true)
     }
   }).bind(this)
   private _capabilities: TerminalCapabilities | null = null
@@ -3883,9 +3880,13 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   /** Queue a debounced resize intent. RESIZE is emitted only after the latest size is accepted. */
   public requestResize(width: number, height: number): void {
+    this.queueResize(width, height)
+  }
+
+  private queueResize(width: number, height: number, terminalDriven = false): void {
     if (this._isDestroyed) return
     if (width !== this._terminalWidth || height !== this._terminalHeight) this.pendingResizeSawDifferentSize = true
-    this.pendingNativeResize = { width, height }
+    this.pendingNativeResize = { width, height, terminalDriven }
 
     if (this.resizeTimeoutId !== null) {
       this.clock.clearTimeout(this.resizeTimeoutId)
@@ -3921,9 +3922,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     }
     let width = resize.width
     let height = resize.height
-    const terminalDriven = this.pendingTerminalResize
-    if (terminalDriven) {
-      this.pendingTerminalResize = false
+    if (resize.terminalDriven) {
       // A terminal signal can be delivered before the host applies the new grid, so
       // re-sample the real size once the debounce expires instead of trusting the
       // size captured at signal time.
@@ -3933,6 +3932,15 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       } catch {
         // A custom stream may not support it; the captured size stays usable.
       }
+      // Refreshing can emit stdout's resize event. Its listeners may replace the
+      // pending intent, destroy the renderer, or start a terminal transition.
+      if (
+        this.pendingNativeResize !== resize ||
+        this.rendering ||
+        this.nativeTerminalTransition ||
+        this.controlState === RendererControlState.EXPLICIT_SUSPENDED
+      )
+        return
       if (stdout.columns > 0 && stdout.rows > 0) {
         width = stdout.columns
         height = stdout.rows
@@ -3941,7 +3949,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       }
     }
     try {
-      this.processResize(width, height, this.pendingResizeSawDifferentSize || terminalDriven)
+      this.processResize(width, height, this.pendingResizeSawDifferentSize || resize.terminalDriven)
       if (this.pendingNativeResize === resize) {
         this.pendingNativeResize = null
         this.pendingResizeSawDifferentSize = false
@@ -3962,7 +3970,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
           (error) => {
             this.nativeResizeWait = null
             this.pendingNativeResize = null
-            this.pendingTerminalResize = false
             if (!this._isDestroyed) this.handleError(error)
             this.resolveIdleIfNeeded()
           },
@@ -4131,7 +4138,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   public resize(width: number, height: number): void {
     if (this._isDestroyed) return
     // An explicit size replaces a debounced requestResize at once.
-    this.pendingTerminalResize = false
     if (this.resizeTimeoutId !== null) {
       this.clock.clearTimeout(this.resizeTimeoutId)
       this.resizeTimeoutId = null
@@ -4598,7 +4604,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       if (!this.nativeSession.disposed && !this.nativeSession.error) this.nativeSession.cancelKittyImageTransport(false)
     }
     this.pendingNativeResize = null
-    this.pendingTerminalResize = false
     this.cancelReadyFrame?.()
     this.cancelReadyFrame = null
     this.cancelFrameContinuation?.()
